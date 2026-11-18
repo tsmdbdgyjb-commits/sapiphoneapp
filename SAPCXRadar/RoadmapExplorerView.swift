@@ -45,8 +45,20 @@ enum RoadmapBookmarks {
 
     private static func key(_ p: Product) -> String { "roadmapURL.\(p.rawValue)" }
 
+    /// Built-in roadmap boards (found in the Roadmap Explorer: Products → CRM → …).
+    static let defaults: [Product: URL] = [
+        .salesV2: URL(string: "https://roadmaps.sap.com/board?PRODUCT=089E017A62AB1EDA94C15F5EDB3300E1&range=CURRENT-LAST")!,
+        // "SAP Field Service and Asset Management" (the Roadmap Explorer's current name for FSM)
+        .fsm: URL(string: "https://roadmaps.sap.com/board?PRODUCT=73555000100800001711&range=CURRENT-LAST")!,
+    ]
+
+    /// The user's saved page wins over the built-in default.
     static func url(for product: Product) -> URL? {
-        UserDefaults.standard.string(forKey: key(product)).flatMap(URL.init(string:))
+        UserDefaults.standard.string(forKey: key(product)).flatMap(URL.init(string:)) ?? defaults[product]
+    }
+
+    static func hasCustom(_ product: Product) -> Bool {
+        UserDefaults.standard.string(forKey: key(product)) != nil
     }
 
     static func save(_ url: URL, for product: Product) {
@@ -77,6 +89,19 @@ final class WebState {
     }
 
     let webView: WKWebView
+    private let errorHandler = SAPErrorHandler()
+    private var recentReloads: [Date] = []
+
+    /// Reloads after an SAP error page: at most 3 times per minute and never
+    /// sooner than 4 s after the last reload (no reload loops).
+    private func recoverFromSAPError() {
+        recentReloads = recentReloads.filter { Date.now.timeIntervalSince($0) < 60 }
+        if let last = recentReloads.last, Date.now.timeIntervalSince(last) < 4 { return }
+        guard recentReloads.count < 3 else { return }
+        recentReloads.append(.now)
+        roadmapLog.debug("SAP error page, reloading")
+        webView.reload()
+    }
 
     init() {
         let config = WKWebViewConfiguration()
@@ -85,7 +110,45 @@ final class WebState {
         // Identify as mobile Safari; some SAP pages fail for unknown embedded browsers.
         config.applicationNameForUserAgent = "Version/18.0 Mobile/15E148 Safari/604.1"
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
+
+        // SAP's single-page app sometimes shows "Something went wrong" or
+        // "Your session expired" right after the silent SSO sign-in; a reload fixes it.
+        // This script reports those pages so the app can reload automatically.
+        let detector = """
+        (function () {
+          var markers = ["Something went wrong", "Your session expired"];
+          // SAP's UI renders inside shadow roots, which innerText does not reach.
+          function deepText(node, depth) {
+            if (!node || depth > 25) return "";
+            var t = "";
+            if (node.nodeType === 3) return node.nodeValue || "";
+            if (node.shadowRoot) t += deepText(node.shadowRoot, depth + 1);
+            for (var c = node.firstChild; c; c = c.nextSibling) t += deepText(c, depth + 1);
+            return t;
+          }
+          var last = 0;
+          function check() {
+            var now = Date.now();
+            if (now - last < 1500 || !document.body) return;
+            last = now;
+            var t = deepText(document.body, 0);
+            for (var i = 0; i < markers.length; i++) {
+              if (t.indexOf(markers[i]) >= 0) {
+                window.webkit.messageHandlers.sapError.postMessage(location.href);
+                return;
+              }
+            }
+          }
+          setInterval(check, 2000);
+          check();
+        })();
+        """
+        config.userContentController.addUserScript(
+            WKUserScript(source: detector, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        config.userContentController.add(errorHandler, name: "sapError")
+
         webView = WKWebView(frame: .zero, configuration: config)
+        errorHandler.onError = { [weak self] in self?.recoverFromSAPError() }
         webView.allowsBackForwardNavigationGestures = true
     }
 
@@ -223,9 +286,9 @@ struct RoadmapExplorerView: View {
                     }
                 }
             }
-            if !savedProducts.isEmpty {
-                Section("Gespeicherte entfernen") {
-                    ForEach(Product.allCases.filter(savedProducts.contains)) { p in
+            if Product.allCases.contains(where: RoadmapBookmarks.hasCustom) {
+                Section("Eigene Seite entfernen") {
+                    ForEach(Product.allCases.filter(RoadmapBookmarks.hasCustom)) { p in
                         Button(p.title, systemImage: "trash", role: .destructive) {
                             RoadmapBookmarks.remove(for: p)
                             refreshSaved()
@@ -257,6 +320,16 @@ struct RoadmapExplorerView: View {
             try? await Task.sleep(for: .seconds(2.5))
             withAnimation(.snappy) { if confirmation == text { confirmation = nil } }
         }
+    }
+}
+
+/// Receives "sapError" messages from the page script. Kept separate from WebState
+/// because WKUserContentController retains its handlers strongly.
+final class SAPErrorHandler: NSObject, WKScriptMessageHandler {
+    var onError: (@MainActor () -> Void)?
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        MainActor.assumeIsolated { onError?() }
     }
 }
 
@@ -298,7 +371,10 @@ struct WebView: UIViewRepresentable {
                 webView.observe(\.url) { [weak self] wv, _ in
                     MainActor.assumeIsolated {
                         self?.state.url = wv.url
-                        if let url = wv.url { roadmapLog.debug("url \(url.absoluteString, privacy: .public)") }
+                        // Log only roadmap pages (never sign-in URLs, which carry one-time codes).
+                        if let url = wv.url, url.host() == "roadmaps.sap.com", !url.path().hasPrefix("/login") {
+                            roadmapLog.debug("url \(url.absoluteString, privacy: .public)")
+                        }
                     }
                 },
                 webView.observe(\.title) { [weak self] wv, _ in

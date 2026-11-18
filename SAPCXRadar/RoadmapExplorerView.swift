@@ -1,5 +1,8 @@
 import SwiftUI
 import WebKit
+import os
+
+private let roadmapLog = Logger(subsystem: "local.sapcxradar.app", category: "roadmap")
 
 /// Roadmap tab: switches between the live SAP Roadmap Explorer and roadmap/release posts.
 struct RoadmapTab: View {
@@ -79,6 +82,9 @@ final class WebState {
         let config = WKWebViewConfiguration()
         // Persistent store: the SAP sign-in survives app restarts.
         config.websiteDataStore = .default()
+        // Identify as mobile Safari; some SAP pages fail for unknown embedded browsers.
+        config.applicationNameForUserAgent = "Version/18.0 Mobile/15E148 Safari/604.1"
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
         webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
     }
@@ -264,6 +270,7 @@ struct WebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let webView = state.webView
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         context.coordinator.observe(webView)
         return webView
     }
@@ -271,7 +278,16 @@ struct WebView: UIViewRepresentable {
     func updateUIView(_ webView: WKWebView, context: Context) {}
 
     @MainActor
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        /// Links that open a new window (target=_blank / window.open) load in the same view.
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+                webView.load(URLRequest(url: url))
+            }
+            return nil
+        }
+
         let state: WebState
         private var observations: [NSKeyValueObservation] = []
 
@@ -280,7 +296,10 @@ struct WebView: UIViewRepresentable {
         func observe(_ webView: WKWebView) {
             observations = [
                 webView.observe(\.url) { [weak self] wv, _ in
-                    MainActor.assumeIsolated { self?.state.url = wv.url }
+                    MainActor.assumeIsolated {
+                        self?.state.url = wv.url
+                        if let url = wv.url { roadmapLog.debug("url \(url.absoluteString, privacy: .public)") }
+                    }
                 },
                 webView.observe(\.title) { [weak self] wv, _ in
                     MainActor.assumeIsolated { self?.state.title = wv.title ?? "" }

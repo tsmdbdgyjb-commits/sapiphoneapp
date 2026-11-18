@@ -23,7 +23,7 @@ struct ContentView: View {
             .badge(store.unreadCount(product: nil))
 
             Tab("Roadmap", systemImage: "map") {
-                NewsListView(title: "Roadmap & Releases", topics: [.roadmap, .release])
+                RoadmapTab()
             }
 
             Tab("Merkliste", systemImage: "bookmark") {
@@ -32,6 +32,10 @@ struct ContentView: View {
 
             Tab("Links", systemImage: "link") {
                 LinksView()
+            }
+
+            Tab(role: .search) {
+                SearchView()
             }
         }
         .task {

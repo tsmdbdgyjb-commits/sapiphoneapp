@@ -63,7 +63,17 @@ final class NewsStore {
         failedSources = Array(Set(failed)).sorted()
     }
 
-    nonisolated private static func fetch(_ source: FeedSource) async -> [NewsItem]? {
+    /// Live search in the whole SAP Community (not limited to the tracked products).
+    nonisolated static func searchCommunity(_ query: String) async -> [NewsItem]? {
+        guard let items = await fetch(.community(query), requireProduct: false) else { return nil }
+        // The community sometimes lists the same post under two URLs.
+        var seenTitles = Set<String>()
+        return items
+            .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+            .filter { seenTitles.insert($0.title.lowercased()).inserted }
+    }
+
+    nonisolated private static func fetch(_ source: FeedSource, requireProduct: Bool = true) async -> [NewsItem]? {
         var request = URLRequest(url: source.url, timeoutInterval: 20)
         request.setValue("Mozilla/5.0 (iPhone) SAPCXRadar/1.0", forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await URLSession.shared.data(for: request),
@@ -72,7 +82,8 @@ final class NewsStore {
         let isNewsCenter = source.url.host?.contains("news.sap.com") == true
 
         return RSSParser.parse(data).compactMap { raw in
-            guard !Classifier.isNoise(title: raw.title), let url = URL(string: raw.link) else { return nil }
+            guard !raw.title.lowercased().hasPrefix("re:"), let url = URL(string: raw.link) else { return nil }
+            if requireProduct, Classifier.isNoise(title: raw.title) { return nil }
             let body = RSSParser.plainText(raw.description, limit: 4000)
             let topic = Classifier.topic(title: raw.title, body: body)
             var products = Classifier.products(title: raw.title, body: body)
@@ -80,7 +91,7 @@ final class NewsStore {
                 products.formUnion(Classifier.releaseProducts(title: raw.title))
             }
 
-            if products.isEmpty {
+            if products.isEmpty && requireProduct {
                 // Keep only general CX news from the official news center.
                 guard isNewsCenter, Classifier.isCXNews(title: raw.title, body: body) else { return nil }
             }
@@ -108,6 +119,25 @@ final class NewsStore {
                 || item.title.localizedCaseInsensitiveContains(search)
                 || item.summary.localizedCaseInsensitiveContains(search))
         }
+    }
+
+    /// Global search over cached news and bookmarks. Every word must match
+    /// (title, summary, author, source or product name).
+    func globalSearch(_ query: String, product: Product?) -> [NewsItem] {
+        let words = query.split(separator: " ").map(String.init).filter { !$0.isEmpty }
+        guard !words.isEmpty else { return [] }
+
+        var seen = Set<String>()
+        let pool = (items + bookmarks).filter { seen.insert($0.id).inserted }
+
+        return pool.filter { item in
+            if let product, !item.products.contains(product) { return false }
+            let haystack = ([item.title, item.summary, item.author ?? "", item.source, item.topic.title]
+                            + item.products.flatMap { [$0.title, $0.shortTitle] })
+                .joined(separator: " ")
+            return words.allSatisfy { haystack.localizedCaseInsensitiveContains($0) }
+        }
+        .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
     }
 
     func unreadCount(product: Product?, topics: Set<Topic>? = nil) -> Int {

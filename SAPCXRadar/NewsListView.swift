@@ -1,8 +1,20 @@
 import SwiftUI
 
 struct NewsListView: View {
-    @Environment(NewsStore.self) private var store
     let title: String
+    let topics: Set<Topic>?
+
+    var body: some View {
+        NavigationStack {
+            NewsListContent(topics: topics)
+                .navigationTitle(title)
+        }
+    }
+}
+
+/// The news list without its own NavigationStack, so it can be embedded (e.g. in the Roadmap tab).
+struct NewsListContent: View {
+    @Environment(NewsStore.self) private var store
     let topics: Set<Topic>?
 
     @AppStorage("selectedProduct") private var productRaw = ""
@@ -13,7 +25,6 @@ struct NewsListView: View {
     private var list: [NewsItem] { store.items(product: product, topics: topics, search: search) }
 
     var body: some View {
-        NavigationStack {
             List {
                 Section {
                     ProductFilter(selection: $productRaw, topics: topics)
@@ -64,8 +75,7 @@ struct NewsListView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle(title)
-            .searchable(text: $search, prompt: "In News suchen")
+            .searchable(text: $search, prompt: "In dieser Liste filtern")
             .refreshable { await store.refresh() }
             .overlay { emptyState }
             .toolbar {
@@ -94,7 +104,6 @@ struct NewsListView: View {
             .sheet(item: $openURL) { url in
                 SafariView(url: url).ignoresSafeArea()
             }
-        }
     }
 
     @ViewBuilder private var emptyState: some View {

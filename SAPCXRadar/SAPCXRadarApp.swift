@@ -22,12 +22,12 @@ struct ContentView: View {
             }
             .badge(store.unreadCount(product: nil))
 
-            Tab("Merkliste", systemImage: "bookmark") {
-                BookmarksView()
-            }
-
             Tab("Roadmap", systemImage: "map") {
                 NewsListView(title: "Roadmap & Releases", topics: [.roadmap, .release])
+            }
+
+            Tab("Merkliste", systemImage: "bookmark") {
+                BookmarksView()
             }
 
             Tab("Links", systemImage: "link") {
